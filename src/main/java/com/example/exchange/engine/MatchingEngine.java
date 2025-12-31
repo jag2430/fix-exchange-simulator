@@ -3,6 +3,8 @@ package com.example.exchange.engine;
 import com.example.exchange.model.Execution;
 import com.example.exchange.model.Order;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -19,6 +21,12 @@ public class MatchingEngine {
   private final AtomicLong orderIdGenerator = new AtomicLong(1);
   private final AtomicLong execIdGenerator = new AtomicLong(1);
 
+  // Lazy injection to avoid circular dependency
+  // LiquidityProvider -> MatchingEngine -> LiquidityProvider
+  @Autowired
+  @Lazy
+  private com.example.exchange.liquidity.LiquidityProvider liquidityProvider;
+
   public List<Execution> submitOrder(Order order) {
     List<Execution> executions = new ArrayList<>();
 
@@ -28,6 +36,20 @@ public class MatchingEngine {
     order.setRemainingQuantity(order.getQuantity());
     order.setFilledQuantity(0);
     order.setStatus(Order.OrderStatus.NEW);
+
+    // Check if this is a market maker order (skip liquidity check for MM orders)
+    boolean isMarketMakerOrder = order.getSenderCompId() != null &&
+        order.getSenderCompId().equals("MARKET_MAKER");
+
+    // Ensure liquidity exists BEFORE matching (only for client orders)
+    if (!isMarketMakerOrder && liquidityProvider != null) {
+      try {
+        liquidityProvider.ensureLiquidity(order.getSymbol(), order);
+      } catch (Exception e) {
+        log.warn("Failed to ensure liquidity for {}: {}", order.getSymbol(), e.getMessage());
+        // Continue anyway - order will rest in book if no liquidity
+      }
+    }
 
     // Get or create order book
     OrderBook book = orderBooks.computeIfAbsent(
@@ -127,9 +149,14 @@ public class MatchingEngine {
     passive.setStatus(passive.getRemainingQuantity() == 0
         ? Order.OrderStatus.FILLED : Order.OrderStatus.PARTIALLY_FILLED);
 
-    // Create execution reports
+    // Create execution reports for aggressor (client order)
     executions.add(createExecution(aggressor, aggressorExecType, matchPrice, matchQty));
-    executions.add(createExecution(passive, passiveExecType, matchPrice, matchQty));
+
+    // Only send execution report for passive order if it's NOT a market maker order
+    // (MM orders don't have a FIX session to receive reports)
+    if (passive.getSenderCompId() == null || !passive.getSenderCompId().equals("MARKET_MAKER")) {
+      executions.add(createExecution(passive, passiveExecType, matchPrice, matchQty));
+    }
 
     // Remove filled passive order from book
     if (passive.getRemainingQuantity() == 0) {
@@ -145,11 +172,6 @@ public class MatchingEngine {
 
   /**
    * Cancel an order by its original client order ID (origClOrdId).
-   *
-   * @param symbol The symbol of the order
-   * @param origClOrdId The original client order ID to cancel
-   * @param clOrdId The new client order ID for this cancel request
-   * @return Execution report for the cancel
    */
   public Execution cancelOrder(String symbol, String origClOrdId, String clOrdId) {
     OrderBook book = orderBooks.get(symbol);
@@ -158,7 +180,6 @@ public class MatchingEngine {
       return createRejectedCancel(origClOrdId, clOrdId, symbol, "Unknown symbol");
     }
 
-    // Look up by client order ID (origClOrdId)
     Order order = book.removeOrderByClOrdId(origClOrdId);
     if (order == null) {
       log.warn("Cancel rejected - order not found: clOrdId={}", origClOrdId);
@@ -189,13 +210,6 @@ public class MatchingEngine {
 
   /**
    * Amend (Cancel/Replace) an order.
-   *
-   * @param symbol The symbol of the order
-   * @param origClOrdId The original client order ID to amend
-   * @param clOrdId The new client order ID for the amended order
-   * @param newQuantity The new total quantity (optional, null to keep existing)
-   * @param newPrice The new price (optional, null to keep existing)
-   * @return List of execution reports (REPLACED for the old order, potentially NEW and fills for new)
    */
   public List<Execution> amendOrder(String symbol, String origClOrdId, String clOrdId,
                                     Long newQuantity, BigDecimal newPrice) {
@@ -208,7 +222,6 @@ public class MatchingEngine {
       return executions;
     }
 
-    // Find the original order (don't remove yet)
     Order originalOrder = book.getOrderByClOrdId(origClOrdId);
     if (originalOrder == null) {
       log.warn("Amend rejected - order not found: clOrdId={}", origClOrdId);
@@ -216,7 +229,6 @@ public class MatchingEngine {
       return executions;
     }
 
-    // Validate new quantity if provided
     long effectiveNewQty = newQuantity != null ? newQuantity : originalOrder.getQuantity();
     if (effectiveNewQty < originalOrder.getFilledQuantity()) {
       log.warn("Amend rejected - new quantity {} less than filled quantity {}",
@@ -226,10 +238,8 @@ public class MatchingEngine {
       return executions;
     }
 
-    // Remove the original order from the book
     book.removeOrderByClOrdId(origClOrdId);
 
-    // Create the amended order
     BigDecimal effectivePrice = newPrice != null ? newPrice : originalOrder.getPrice();
     long newRemainingQty = effectiveNewQty - originalOrder.getFilledQuantity();
 
@@ -249,7 +259,6 @@ public class MatchingEngine {
         .createdTime(LocalDateTime.now())
         .build();
 
-    // Generate REPLACED execution report
     executions.add(Execution.builder()
         .execId(generateExecId())
         .orderId(amendedOrder.getOrderId())
@@ -269,7 +278,6 @@ public class MatchingEngine {
     log.info("Order amended: origClOrdId={}, newClOrdId={}, newQty={}, newPrice={}",
         origClOrdId, clOrdId, effectiveNewQty, effectivePrice);
 
-    // Try to match the amended order
     if (amendedOrder.getRemainingQuantity() > 0) {
       if (amendedOrder.getOrderType() == Order.OrderType.LIMIT) {
         executions.addAll(matchLimitOrder(amendedOrder, book));
@@ -277,7 +285,6 @@ public class MatchingEngine {
         executions.addAll(matchMarketOrder(amendedOrder, book));
       }
 
-      // If still has remaining quantity, add to book
       if (amendedOrder.getRemainingQuantity() > 0 &&
           amendedOrder.getOrderType() == Order.OrderType.LIMIT) {
         book.addOrder(amendedOrder);

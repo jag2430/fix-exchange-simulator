@@ -4,7 +4,52 @@ server:
 fix:
   config-file: quickfix-server.cfg
 
+# ============================================
+# LIQUIDITY PROVIDER CONFIGURATION
+# ============================================
+liquidity-provider:
+  # Enable/disable the liquidity provider
+  enabled: true
+
+  # Finnhub API configuration
+  finnhub:
+    # Your Finnhub API key
+    api-key: d58rhg9r01qvj8iiggc0d58rhg9r01qvj8iiggcg
+
+    # How long to cache prices (seconds)
+    cache-ttl-seconds: 30
+
+  # How often to refresh quotes (milliseconds)
+  refresh-interval-ms: 5000
+
+  # Fallback price when Finnhub is unavailable
+  fallback-price: 100.00
+
+# ============================================
+# DYNAMIC PROFILE TIERS (Auto-classified)
+# ============================================
+# Spreads and quantities are now automatically
+# determined based on each stock's market cap:
+#
+# Tier       | Market Cap    | Spread | Base Qty
+# -----------|---------------|--------|----------
+# MEGA_CAP   | > $500B       | 1 bps  | 1000
+# LARGE_CAP  | $50B - $500B  | 2 bps  | 500
+# MID_CAP    | $10B - $50B   | 5 bps  | 200
+# SMALL_CAP  | < $10B        | 10 bps | 100
+#
+# Examples:
+#   AAPL ($3.4T)  → MEGA_CAP  → 1 bps spread (~$0.03)
+#   AMD ($200B)   → LARGE_CAP → 2 bps spread
+#   SNAP ($18B)   → MID_CAP   → 5 bps spread
+#   Small stocks  → SMALL_CAP → 10 bps spread
+# ============================================
+
+# ============================================
+# LOGGING CONFIGURATION
+# ============================================
 logging:
   level:
     quickfix: INFO
     com.example: DEBUG
+    com.example.exchange.liquidity: INFO
