@@ -2,6 +2,8 @@
 
 A Spring Boot application that simulates a financial exchange using QuickFIX/J for FIX protocol communication, featuring a price-time priority matching engine and built-in liquidity provider for realistic order execution.
 
+> **This is part of a 4-repository FIX Trading System.** See [fix-trading-ui](https://github.com/jag2430/fix-trading-ui) for the main entry point and system overview.
+
 ## Overview
 
 The FIX Exchange Simulator provides a realistic trading venue for testing FIX-based trading applications. It implements a full order matching engine with price-time priority and includes an intelligent liquidity provider that automatically posts bid/ask quotes using real market prices from Finnhub.
@@ -13,12 +15,18 @@ The FIX Exchange Simulator provides a realistic trading venue for testing FIX-ba
 - **Continuous Matching**: Incoming orders immediately match against resting orders
 - **Partial Fills**: Support for partial order execution
 - **Order Book Management**: Maintains separate bid and ask books per symbol
+- **ClOrdId Index**: Fast cancel/amend lookup via `clOrdIdIndex` in OrderBook
+- **Thread-Safe**: Uses `ConcurrentSkipListMap` for O(log n) price level operations
 
 ### Liquidity Provider
 - **Automatic Quote Generation**: Posts market maker quotes when first order arrives
 - **Real Reference Prices**: Fetches actual prices from Finnhub API
 - **Liquidity Profiles**: Spread and size based on market cap tier
 - **Multi-Level Quotes**: Posts multiple price levels with increasing size
+- **Market Maker Order Filtering**: MM orders don't trigger liquidity setup or receive execution reports (`isMarketMakerOrder` check)
+- **Profile Caching**: `LiquidityProfileService.profileCache` avoids redundant Finnhub API calls
+- **Price Refresh Scheduling**: `@Scheduled refreshAllQuotes()` periodically updates quotes based on price movement
+- **Liquidity Pre-Warming**: `POST /api/liquidity/setup/{symbol}` to setup quotes before first order
 
 ### FIX Protocol Support
 - **FIX 4.4** protocol via QuickFIX/J
@@ -28,7 +36,7 @@ The FIX Exchange Simulator provides a realistic trading venue for testing FIX-ba
 - **ExecutionReport (8)**: Send acknowledgments and fills
 
 ### REST API
-- Order book inspection
+- Order book inspection (`/api/exchange/orderbook/{symbol}`)
 - Liquidity provider management
 - Symbol listings
 - Health monitoring
@@ -105,8 +113,8 @@ The matching engine maintains a two-sided order book for each symbol:
 │   ┌──────────────────────────┐         ┌──────────────────────────┐         │
 │   │ Price     Qty    Time    │         │ Price     Qty    Time    │         │
 │   ├──────────────────────────┤         ├──────────────────────────┤         │
-│   │ $150.00   500    09:30:01│◀─ Best   $150.05   300    09:30:00 ◀─ Best 
-│   │ $149.95   1000   09:30:02│    Bid  │ $150.10   800    09:30:01│   Ask   │
+│   │ $150.00   500    09:30:01│<─ Best  │ $150.05   300    09:30:00│<─ Best  │
+│   │ $149.95   1000   09:30:02│   Bid   │ $150.10   800    09:30:01│   Ask   │
 │   │ $149.90   750    09:30:03│         │ $150.15   500    09:30:02│         │
 │   │ $149.85   2000   09:30:04│         │ $150.20   1200   09:30:03│         │
 │   └──────────────────────────┘         └──────────────────────────┘         │
@@ -276,7 +284,7 @@ SocketAcceptPort=9876
 
 ## Quick Start
 
-### 1. Get Finnhub API Key
+### 1. Sign Up For Free Finnhub API Key
 
 Sign up for free at https://finnhub.io/register
 
@@ -403,6 +411,7 @@ liquidity-provider:
 | `LIQUIDITY_ENABLED` | Enable liquidity provider | true |
 | `LIQUIDITY_LEVELS` | Number of price levels | 5 |
 | `LIQUIDITY_BASE_SPREAD_BPS` | Spread in basis points | 10 |
+| `LIQUIDITY_FALLBACK_PRICE` | Fallback price when Finnhub unavailable | 100.00 |
 | `FIX_ACCEPTOR_PORT` | FIX protocol port | 9876 |
 
 ## Project Structure
@@ -427,6 +436,7 @@ fix-exchange-simulator/
 │   │   │   ├── liquidity/
 │   │   │   │   ├── LiquidityProvider.java
 │   │   │   │   ├── LiquidityProfile.java
+│   │   │   │   ├── LiquidityProfileService.java
 │   │   │   │   └── FinnhubPriceService.java
 │   │   │   └── model/
 │   │   │       ├── Execution.java
@@ -445,10 +455,10 @@ The exchange works directly with the `fix-client` application:
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│  Trading UI     ────▶   FIX Client      ────▶    Exchange       
-│  (Dash:8050)    │REST │  (Spring:8081)  │ FIX │  (Spring:9876)   │
-└─────────────────┘     └────────┬────────┘     └────────┬─────────┘
-                                 │                       │
+│  Trading UI     │────>│   FIX Client    │────>│    Exchange      │
+│  (Dash:8050)    │REST │  (Spring:8081)  │ FIX │  (This Repo)     │
+└─────────────────┘     └────────┬────────┘     │  (Spring:9876)   │
+                                 │              └────────┬─────────┘
                                  │                       │
                                  ▼                       ▼
                         ┌─────────────────┐     ┌─────────────────┐
@@ -505,7 +515,15 @@ Orders will rest in the book until matching counter-orders arrive.
 
 ## Performance Notes
 
-- **First Order**: ~100-200ms (Finnhub API call)
+- **First Order**: ~100-200ms (Finnhub API call for liquidity setup)
 - **Subsequent Orders**: <1ms (in-memory matching)
 - **Order Book**: ConcurrentSkipListMap for thread-safe sorted access
 - **Matching**: O(log n) price level lookup + O(1) FIFO at each level
+
+## Related Repositories
+
+| Repository                                                        | Description |
+|-------------------------------------------------------------------|-------------|
+| [fix-trading-ui](https://github.com/jag2430/fix-trading-ui)       | Order entry UI (main entry point) |
+| [fix-client](https://github.com/jag2430/fix-client)               | FIX middleware & REST API |
+| [portfolio-blotter](https://github.com/jag2430/portfolio-blotter) | P&L monitoring dashboard |
